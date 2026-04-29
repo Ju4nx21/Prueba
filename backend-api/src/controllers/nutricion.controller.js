@@ -42,15 +42,16 @@ export const createAlimento = async (req, res) => {
       costo_por_kg,
       proveedor,
       stock_kg,
-      observaciones
+      observaciones,
+      granjas_id // <-- Añadido para que coincida con tu frontend
     } = req.body;
 
     const { rows } = await pool.query(
       `INSERT INTO alimentacion 
-       (nombre_alimento, tipo, proteina_porcentaje, costo_por_kg, proveedor, stock_kg, observaciones)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (nombre_alimento, tipo, proteina_porcentaje, costo_por_kg, proveedor, stock_kg, observaciones, granjas_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [nombre_alimento, tipo, proteina_porcentaje, costo_por_kg, proveedor, stock_kg || 0, observaciones]
+      [nombre_alimento, tipo, proteina_porcentaje, costo_por_kg, proveedor, stock_kg || 0, observaciones, granjas_id]
     );
 
     res.status(201).json(rows[0]);
@@ -116,11 +117,12 @@ export const deleteAlimento = async (req, res) => {
 // Obtener todos los consumos
 export const getConsumos = async (req, res) => {
   try {
+    // CORREGIDO: pigs_id y alimentacion_id
     const { rows } = await pool.query(`
       SELECT c.*, p.codigo_arete, p.nombre as nombre_cerdo, a.nombre_alimento, a.tipo as tipo_alimento
       FROM consumo_alimento c
-      LEFT JOIN pigs p ON c.pig_id = p.id
-      LEFT JOIN alimentacion a ON c.alimento_id = a.id
+      LEFT JOIN pigs p ON c.pigs_id = p.id
+      LEFT JOIN alimentacion a ON c.alimentacion_id = a.id
       ORDER BY c.fecha DESC
     `);
     res.json(rows);
@@ -132,12 +134,13 @@ export const getConsumos = async (req, res) => {
 // Obtener consumo por cerdo
 export const getConsumoByPig = async (req, res) => {
   try {
-    const { pig_id } = req.params;
+    const { pig_id } = req.params; // Esto es de la URL, puede quedar igual
+    // CORREGIDO: pigs_id y alimentacion_id
     const { rows } = await pool.query(`
       SELECT c.*, a.nombre_alimento, a.tipo as tipo_alimento
       FROM consumo_alimento c
-      LEFT JOIN alimentacion a ON c.alimento_id = a.id
-      WHERE c.pig_id = $1
+      LEFT JOIN alimentacion a ON c.alimentacion_id = a.id
+      WHERE c.pigs_id = $1
       ORDER BY c.fecha DESC
     `, [pig_id]);
     res.json(rows);
@@ -149,21 +152,23 @@ export const getConsumoByPig = async (req, res) => {
 // Crear nuevo consumo
 export const createConsumo = async (req, res) => {
   try {
+    // CORREGIDO: Extraemos los nombres exactos que manda React
     const {
-      pig_id,
-      alimento_id,
+      pigs_id,
+      alimentacion_id,
       fecha,
       cantidad_kg,
       lote,
-      observaciones
+      observaciones,
+      granjas_id
     } = req.body;
 
-    if (!alimento_id || !cantidad_kg || cantidad_kg <= 0) {
+    if (!alimentacion_id || !cantidad_kg || cantidad_kg <= 0) {
       return res.status(400).json({ error: "Debe especificar un alimento y una cantidad válida mayor a 0." });
     }
 
     // 1. Validar Stock Suficiente
-    const stockCheck = await pool.query("SELECT nombre_alimento, stock_kg FROM alimentacion WHERE id = $1", [alimento_id]);
+    const stockCheck = await pool.query("SELECT nombre_alimento, stock_kg FROM alimentacion WHERE id = $1", [alimentacion_id]);
 
     if (stockCheck.rows.length === 0) {
       return res.status(404).json({ error: "El alimento especificado no existe." });
@@ -179,18 +184,19 @@ export const createConsumo = async (req, res) => {
       });
     }
 
+    // CORREGIDO: Nombres de columnas de la BD
     const { rows } = await pool.query(
       `INSERT INTO consumo_alimento 
-       (pig_id, alimento_id, fecha, cantidad_kg, lote, observaciones)
-       VALUES ($1, $2, $3, $4, $5, $6)
+       (pigs_id, alimentacion_id, fecha, cantidad_kg, lote, observaciones, granjas_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [pig_id, alimento_id, fecha, cantidad_kg, lote, observaciones]
+      [pigs_id, alimentacion_id, fecha, cantidad_kg, lote, observaciones, granjas_id]
     );
 
     // Actualizar stock del alimento
     await pool.query(
       "UPDATE alimentacion SET stock_kg = stock_kg - $1 WHERE id = $2",
-      [cantidad_kg, alimento_id]
+      [cantidad_kg, alimentacion_id]
     );
 
     res.status(201).json(rows[0]);
@@ -205,26 +211,27 @@ export const updateConsumo = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      pig_id,
-      alimento_id,
+      pigs_id,
+      alimentacion_id,
       fecha,
       cantidad_kg,
       lote,
       observaciones
     } = req.body;
 
-    // Obtener cantidad anterior para ajustar stock
+    // CORREGIDO: alimentacion_id
     const { rows: oldRows } = await pool.query(
-      "SELECT cantidad_kg, alimento_id FROM consumo_alimento WHERE id = $1",
+      "SELECT cantidad_kg, alimentacion_id FROM consumo_alimento WHERE id = $1",
       [id]
     );
 
+    // CORREGIDO: Nombres de columnas
     const { rows } = await pool.query(
       `UPDATE consumo_alimento 
-       SET pig_id = $1, alimento_id = $2, fecha = $3, cantidad_kg = $4, lote = $5, observaciones = $6
+       SET pigs_id = $1, alimentacion_id = $2, fecha = $3, cantidad_kg = $4, lote = $5, observaciones = $6
        WHERE id = $7
        RETURNING *`,
-      [pig_id, alimento_id, fecha, cantidad_kg, lote, observaciones, id]
+      [pigs_id, alimentacion_id, fecha, cantidad_kg, lote, observaciones, id]
     );
 
     if (rows.length === 0) {
@@ -234,7 +241,7 @@ export const updateConsumo = async (req, res) => {
     // Ajustar stock: devolver cantidad anterior y restar nueva cantidad
     if (oldRows.length > 0) {
       const oldCantidad = oldRows[0].cantidad_kg;
-      const oldAlimentoId = oldRows[0].alimento_id;
+      const oldAlimentoId = oldRows[0].alimentacion_id;
 
       // Devolver cantidad anterior
       await pool.query(
@@ -243,10 +250,10 @@ export const updateConsumo = async (req, res) => {
       );
 
       // Restar nueva cantidad
-      if (alimento_id && cantidad_kg) {
+      if (alimentacion_id && cantidad_kg) {
         await pool.query(
           "UPDATE alimentacion SET stock_kg = stock_kg - $1 WHERE id = $2",
-          [cantidad_kg, alimento_id]
+          [cantidad_kg, alimentacion_id]
         );
       }
     }
@@ -262,9 +269,9 @@ export const deleteConsumo = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Obtener datos antes de eliminar para ajustar stock
+    // CORREGIDO: alimentacion_id
     const { rows: oldRows } = await pool.query(
-      "SELECT cantidad_kg, alimento_id FROM consumo_alimento WHERE id = $1",
+      "SELECT cantidad_kg, alimentacion_id FROM consumo_alimento WHERE id = $1",
       [id]
     );
 
@@ -279,10 +286,10 @@ export const deleteConsumo = async (req, res) => {
 
     // Devolver cantidad al stock
     if (oldRows.length > 0) {
-      const { cantidad_kg, alimento_id } = oldRows[0];
+      const { cantidad_kg, alimentacion_id } = oldRows[0];
       await pool.query(
         "UPDATE alimentacion SET stock_kg = stock_kg + $1 WHERE id = $2",
-        [cantidad_kg, alimento_id]
+        [cantidad_kg, alimentacion_id]
       );
     }
 
@@ -295,14 +302,15 @@ export const deleteConsumo = async (req, res) => {
 // Obtener estadísticas de consumo
 export const getEstadisticasConsumo = async (req, res) => {
   try {
+    // CORREGIDO: pigs_id y alimentacion_id
     const { rows } = await pool.query(`
       SELECT 
         a.nombre_alimento,
         a.tipo,
         SUM(c.cantidad_kg) as total_consumido,
-        COUNT(DISTINCT c.pig_id) as cerdos_consumieron
+        COUNT(DISTINCT c.pigs_id) as cerdos_consumieron
       FROM consumo_alimento c
-      LEFT JOIN alimentacion a ON c.alimento_id = a.id
+      LEFT JOIN alimentacion a ON c.alimentacion_id = a.id
       WHERE c.fecha >= CURRENT_DATE - INTERVAL '30 days'
       GROUP BY a.id, a.nombre_alimento, a.tipo
       ORDER BY total_consumido DESC
