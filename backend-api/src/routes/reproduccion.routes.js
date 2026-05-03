@@ -1,33 +1,40 @@
 import { Router } from "express";
 import { validateAuth } from "../middlewares/auth.middleware.js";
 import {
-  getReproduccion,
-  getReproduccionById,
-  createReproduccion,
-  updateReproduccion,
-  deleteReproduccion,
+  getServicios,
+  getServicioById,
+  createServicio,
+  updateServicio,
+  deleteServicio,
   getPartos,
+  getPartoById,
   createParto,
   updateParto,
-  deleteParto
+  deleteParto,
+  getStats,
 } from "../controllers/reproduccion.controller.js";
 
 const router = Router();
 
-// Todas las rutas de reproducción requieren autenticación
+// Todas las rutas requieren autenticación
 router.use(validateAuth);
 
-// Rutas de reproducción
-router.get("/", getReproduccion);
-router.get("/:id", getReproduccionById);
-router.post("/", createReproduccion);
-router.put("/:id", updateReproduccion);
-router.delete("/:id", deleteReproduccion);
+// ── Estadísticas ─────────────────────────────────────────────────────────────
+router.get("/stats", getStats);
 
-// Rutas de partos
-router.get("/partos/all", getPartos);
-router.post("/partos", createParto);
-router.put("/partos/:id", updateParto);
-router.delete("/partos/:id", deleteParto);
+// ── Servicios (montas / inseminaciones) ──────────────────────────────────────
+// IMPORTANTE: las rutas estáticas van ANTES de las dinámicas (/:id)
+router.get("/servicios",      getServicios);
+router.get("/servicios/:id",  getServicioById);
+router.post("/servicios",     createServicio);
+router.put("/servicios/:id",  updateServicio);
+router.delete("/servicios/:id", deleteServicio);
+
+// ── Partos ───────────────────────────────────────────────────────────────────
+router.get("/partos",         getPartos);
+router.get("/partos/:id",     getPartoById);
+router.post("/partos",        createParto);
+router.put("/partos/:id",     updateParto);
+router.delete("/partos/:id",  deleteParto);
 
 export default router;

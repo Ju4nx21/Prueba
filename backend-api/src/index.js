@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path"; // <-- NUEVO: Para manejar rutas de carpetas
+import { fileURLToPath } from "url"; // <-- NUEVO: Para crear __dirname en ES Modules
+
 import authRoutes from "./routes/auth.routes.js";
 import pigsRoutes from "./routes/pigs.routes.js";
 import reproduccionRoutes from "./routes/reproduccion.routes.js";
@@ -14,13 +17,17 @@ import { notFound, errorHandler } from "./middlewares/errorHandler.middleware.js
 
 dotenv.config();
 
+// <-- NUEVO: Configuración de __dirname para ES Modules -->
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Configuración de CORS para producción y desarrollo
 const allowedOrigins = [
   "http://localhost:3000",
-  "https://agrofarm-sistema.vercel.app"
+  "https://prueba-mfws.onrender.com/api"
 ];
 
 app.use(cors({ 
@@ -29,6 +36,10 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(requestLogger); // Log de todas las peticiones
+
+// <-- NUEVO: Exponer la carpeta de fotos para que el frontend las pueda ver -->
+// Cuando el frontend pida algo de "localhost:4000/uploads/...", Express buscará en esa carpeta
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health check endpoints (ligeros para mantener el servidor activo)
 const healthResponse = (_req, res) => {

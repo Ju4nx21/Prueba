@@ -1,19 +1,37 @@
 import { pool } from "../config/db.js";
 import bcrypt from "bcryptjs";
 
-// Obtener perfil del usuario actual
-export const getPerfil = async (req, res) => {
+// Actualizar perfil del usuario
+export const updatePerfil = async (req, res) => {
   try {
-    const { username } = req.query;
+    const { id } = req.params;
+    const {
+      nombre_completo,
+      email,
+      telefono,
+      cargo
+    } = req.body;
+
+    // Lógica para la foto:
+    let avatar_url = null; 
     
-    if (!username) {
-      return res.status(400).json({ error: "Username es requerido" });
+    // Si Multer atrapó una imagen, armamos la ruta
+    if (req.file) {
+      avatar_url = `/uploads/profiles/${req.file.filename}`;
     }
 
+    // Usamos COALESCE en SQL: Si $4 (avatar_url) es NULL, deja el avatar que ya tenía en la BD
     const { rows } = await pool.query(
-      `SELECT id, username, role, nombre_completo, email, telefono, avatar_url, cargo, created_at, updated_at
-       FROM users WHERE username = $1`,
-      [username]
+      `UPDATE users 
+       SET nombre_completo = $1, 
+           email = $2, 
+           telefono = $3, 
+           avatar_url = COALESCE($4, avatar_url), 
+           cargo = $5, 
+           updated_at = NOW()
+       WHERE id = $6
+       RETURNING id, username, role, nombre_completo, email, telefono, avatar_url, cargo, created_at, updated_at`,
+      [nombre_completo, email, telefono, avatar_url, cargo, id]
     );
 
     if (rows.length === 0) {

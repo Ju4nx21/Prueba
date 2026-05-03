@@ -1,215 +1,310 @@
 import { pool } from "../config/db.js";
 
-// Obtener todos los registros de reproducción
-export const getReproduccion = async (req, res) => {
+// ─── STATS ────────────────────────────────────────────────────────────────────
+export const getStats = async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT r.*, p.codigo_arete, p.sexo
-      FROM reproduccion r
-      LEFT JOIN pigs p ON r.pig_id = p.id
-      ORDER BY r.fecha_servicio DESC
-    `);
-    res.json(rows);
+    const { granja_id } = req.user;
+
+    const [montas, gestantes, partosProximos, lechones] = await Promise.all([
+      // Montas últimos 30 días
+      pool.query(`
+        SELECT COUNT(*) AS total FROM reproduccion
+        WHERE granja_id = $1 AND fecha_servicio >= NOW() - INTERVAL '30 days'
+      `, [granja_id]),
+
+      // Cerdas en gestación activa
+      pool.query(`
+        SELECT COUNT(*) AS total FROM reproduccion
+        WHERE granja_id = $1 AND estado IN ('GESTANTE', 'CONFIRMADA')
+      `, [granja_id]),
+
+      // Partos estimados próximos 15 días
+      pool.query(`
+        SELECT COUNT(*) AS total FROM reproduccion
+        WHERE granja_id = $1
+          AND fecha_probable_parto BETWEEN NOW() AND NOW() + INTERVAL '15 days'
+          AND estado IN ('GESTANTE', 'CONFIRMADA')
+      `, [granja_id]),
+
+      // Lechones nacidos últimos 30 días
+      pool.query(`
+        SELECT COALESCE(SUM(pa.lechones_nacidos_vivos), 0) AS total
+        FROM partos pa
+        JOIN reproduccion r ON pa.reproduccion_id = r.id
+        WHERE r.granja_id = $1 AND pa.fecha_parto >= NOW() - INTERVAL '30 days'
+      `, [granja_id]),
+    ]);
+
+    res.json({
+      montas:          parseInt(montas.rows[0].total),
+      gestantes:       parseInt(gestantes.rows[0].total),
+      partos_proximos: parseInt(partosProximos.rows[0].total),
+      lechones:        parseInt(lechones.rows[0].total),
+    });
   } catch (error) {
+    console.error("Error en getStats:", error);
     res.status(500).json({ error: error.message });
   }
 };
 
-// Obtener reproducción por ID
-export const getReproduccionById = async (req, res) => {
+// ─── SERVICIOS ────────────────────────────────────────────────────────────────
+
+export const getServicios = async (req, res) => {
+  try {
+    const { granja_id } = req.user;
+    const { tipo, estado, desde, hasta, pig_id } = req.query;
+
+    let conditions = ["r.granja_id = $1"];
+    let params = [granja_id];
+    let idx = 2;
+
+    if (tipo)   { conditions.push(`r.tipo_servicio = $${idx++}`); params.push(tipo); }
+    if (estado) { conditions.push(`r.estado = $${idx++}`);        params.push(estado); }
+    if (desde)  { conditions.push(`r.fecha_servicio >= $${idx++}`); params.push(desde); }
+    if (hasta)  { conditions.push(`r.fecha_servicio <= $${idx++}`); params.push(hasta); }
+    if (pig_id) { conditions.push(`r.pig_id = $${idx++}`);        params.push(pig_id); }
+
+    const { rows } = await pool.query(`
+      SELECT
+        r.*,
+        cerda.codigo_arete  AS cerda_arete,
+        cerda.raza          AS cerda_raza,
+        macho.codigo_arete  AS verraco_arete,
+        macho.raza          AS verraco_raza
+      FROM reproduccion r
+      LEFT JOIN pigs cerda ON r.pig_id    = cerda.id
+      LEFT JOIN pigs macho ON r.verraco_pig_id = macho.id
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY r.fecha_servicio DESC
+    `, params);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error en getServicios:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getServicioById = async (req, res) => {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query(`
-      SELECT r.*, p.codigo_arete, p.sexo
-      FROM reproduccion r
-      LEFT JOIN pigs p ON r.pig_id = p.id
-      WHERE r.id = $1
-    `, [id]);
+    const { granja_id } = req.user;
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Registro no encontrado" });
-    }
+    const { rows } = await pool.query(`
+      SELECT
+        r.*,
+        cerda.codigo_arete AS cerda_arete,
+        cerda.raza         AS cerda_raza,
+        macho.codigo_arete AS verraco_arete,
+        macho.raza         AS verraco_raza
+      FROM reproduccion r
+      LEFT JOIN pigs cerda ON r.pig_id         = cerda.id
+      LEFT JOIN pigs macho ON r.verraco_pig_id = macho.id
+      WHERE r.id = $1 AND r.granja_id = $2
+    `, [id, granja_id]);
+
+    if (rows.length === 0) return res.status(404).json({ error: "Servicio no encontrado" });
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Crear nuevo registro de reproducción
-export const createReproduccion = async (req, res) => {
+export const createServicio = async (req, res) => {
   try {
+    const { granja_id } = req.user;
     const {
-      pig_id,
-      tipo_servicio,
+      cerda_id,       // pig_id de la cerda
+      verraco_id,     // pig_id del verraco (opcional, puede ser null si es IA con semen externo)
       fecha_servicio,
-      verraco,
-      fecha_probable_parto,
-      estado,
-      observaciones
+      tipo_servicio,
+      tecnico,
+      observaciones,
+      fecha_probable_parto, // Si no viene, se calcula (114 días = gestación porcina)
     } = req.body;
 
-    // 1. Validar que la cerda exista y sea HEMBRA
-    const pigCheck = await pool.query("SELECT sexo FROM pigs WHERE id = $1", [pig_id]);
-
-    if (pigCheck.rows.length === 0) {
-      return res.status(404).json({ error: "La cerda especificada no existe." });
-    }
-
-    if (pigCheck.rows[0].sexo !== 'Hembra') {
-      return res.status(400).json({ error: "Solo se pueden registrar servicios a cerdas (Hembras)." });
-    }
-
-    // 2. Validar que no tenga un proceso reproductivo activo (GESTANTE o CONFIRMADA)
-    const activeService = await pool.query(
-      "SELECT id FROM reproduccion WHERE pig_id = $1 AND estado IN ('GESTANTE', 'CONFIRMADA')",
-      [pig_id]
+    // Validar cerda
+    const cerdaCheck = await pool.query(
+      "SELECT id, sexo FROM pigs WHERE id = $1 AND granja_id = $2",
+      [cerda_id, granja_id]
     );
+    if (cerdaCheck.rows.length === 0)
+      return res.status(404).json({ error: "La cerda especificada no existe en esta granja." });
+    if (cerdaCheck.rows[0].sexo !== "Hembra")
+      return res.status(400).json({ error: "Solo se pueden registrar servicios a hembras." });
 
-    if (activeService.rows.length > 0) {
+    // Validar que no tenga servicio activo
+    const activo = await pool.query(
+      "SELECT id FROM reproduccion WHERE pig_id = $1 AND estado IN ('GESTANTE','CONFIRMADA')",
+      [cerda_id]
+    );
+    if (activo.rows.length > 0)
       return res.status(400).json({
-        error: "Esta cerda ya tiene un proceso reproductivo activo (Gestante o Confirmada). Registre el parto o finalice el proceso actual antes de iniciar uno nuevo."
+        error: "Esta cerda ya tiene un proceso reproductivo activo. Registre el parto o finalice el proceso actual."
       });
-    }
 
-    const { rows } = await pool.query(
-      `INSERT INTO reproduccion 
-       (pig_id, tipo_servicio, fecha_servicio, verraco, fecha_probable_parto, estado, observaciones)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [pig_id, tipo_servicio, fecha_servicio, verraco, fecha_probable_parto, estado || 'GESTANTE', observaciones]
-    );
+    // Calcular fecha probable de parto si no viene (114 días)
+    const fechaParto = fecha_probable_parto || (() => {
+      const d = new Date(fecha_servicio);
+      d.setDate(d.getDate() + 114);
+      return d.toISOString().split("T")[0];
+    })();
+
+    const { rows } = await pool.query(`
+      INSERT INTO reproduccion
+        (granja_id, pig_id, verraco_pig_id, tipo_servicio, fecha_servicio,
+         fecha_probable_parto, estado, tecnico, observaciones)
+      VALUES ($1, $2, $3, $4, $5, $6, 'GESTANTE', $7, $8)
+      RETURNING *
+    `, [granja_id, cerda_id, verraco_id || null, tipo_servicio, fecha_servicio,
+        fechaParto, tecnico || null, observaciones || null]);
 
     res.status(201).json(rows[0]);
   } catch (error) {
-    console.error("Error en createReproduccion:", error);
-    res.status(500).json({ ok: false, error: "Error interno del servidor", detail: error.message });
+    console.error("Error en createServicio:", error);
+    res.status(500).json({ error: error.message });
   }
 };
 
-// Actualizar reproducción
-export const updateReproduccion = async (req, res) => {
+export const updateServicio = async (req, res) => {
   try {
     const { id } = req.params;
+    const { granja_id } = req.user;
     const {
-      pig_id,
-      tipo_servicio,
-      fecha_servicio,
-      verraco,
-      fecha_probable_parto,
-      estado,
-      observaciones
+      cerda_id, verraco_id, fecha_servicio, tipo_servicio,
+      tecnico, observaciones, estado, fecha_probable_parto,
     } = req.body;
 
-    const { rows } = await pool.query(
-      `UPDATE reproduccion 
-       SET pig_id = $1, tipo_servicio = $2, fecha_servicio = $3, verraco = $4,
-           fecha_probable_parto = $5, estado = $6, observaciones = $7
-       WHERE id = $8
-       RETURNING *`,
-      [pig_id, tipo_servicio, fecha_servicio, verraco, fecha_probable_parto, estado, observaciones, id]
-    );
+    const { rows } = await pool.query(`
+      UPDATE reproduccion SET
+        pig_id = $1, verraco_pig_id = $2, fecha_servicio = $3,
+        tipo_servicio = $4, tecnico = $5, observaciones = $6,
+        estado = $7, fecha_probable_parto = $8
+      WHERE id = $9 AND granja_id = $10
+      RETURNING *
+    `, [cerda_id, verraco_id || null, fecha_servicio, tipo_servicio,
+        tecnico || null, observaciones || null, estado, fecha_probable_parto, id, granja_id]);
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Registro no encontrado" });
-    }
-
+    if (rows.length === 0) return res.status(404).json({ error: "Servicio no encontrado" });
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Eliminar reproducción
-export const deleteReproduccion = async (req, res) => {
+export const deleteServicio = async (req, res) => {
   try {
     const { id } = req.params;
+    const { granja_id } = req.user;
+
     const { rows } = await pool.query(
-      "DELETE FROM reproduccion WHERE id = $1 RETURNING *",
-      [id]
+      "DELETE FROM reproduccion WHERE id = $1 AND granja_id = $2 RETURNING *",
+      [id, granja_id]
     );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Registro no encontrado" });
-    }
-
-    res.json({ message: "Registro eliminado exitosamente" });
+    if (rows.length === 0) return res.status(404).json({ error: "Servicio no encontrado" });
+    res.json({ message: "Servicio eliminado exitosamente" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// === PARTOS ===
+// ─── PARTOS ───────────────────────────────────────────────────────────────────
 
-// Obtener todos los partos
 export const getPartos = async (req, res) => {
   try {
+    const { granja_id } = req.user;
+
     const { rows } = await pool.query(`
-      SELECT pa.*, p.codigo_arete, r.fecha_servicio
+      SELECT
+        pa.*,
+        cerda.codigo_arete        AS cerda_arete,
+        cerda.raza                AS cerda_raza,
+        r.fecha_servicio,
+        r.tipo_servicio,
+        (pa.lechones_nacidos_vivos + COALESCE(pa.lechones_nacidos_muertos,0)
+         + COALESCE(pa.lechones_momificados,0)) AS total_lechones
       FROM partos pa
-      LEFT JOIN pigs p ON pa.pig_id = p.id
       LEFT JOIN reproduccion r ON pa.reproduccion_id = r.id
+      LEFT JOIN pigs cerda     ON pa.pig_id = cerda.id
+      WHERE r.granja_id = $1
       ORDER BY pa.fecha_parto DESC
-    `);
+    `, [granja_id]);
+
     res.json(rows);
+  } catch (error) {
+    console.error("Error en getPartos:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+export const getPartoById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { granja_id } = req.user;
+
+    const { rows } = await pool.query(`
+      SELECT pa.*, cerda.codigo_arete AS cerda_arete, r.fecha_servicio
+      FROM partos pa
+      LEFT JOIN reproduccion r ON pa.reproduccion_id = r.id
+      LEFT JOIN pigs cerda     ON pa.pig_id = cerda.id
+      WHERE pa.id = $1 AND r.granja_id = $2
+    `, [id, granja_id]);
+
+    if (rows.length === 0) return res.status(404).json({ error: "Parto no encontrado" });
+    res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Crear nuevo parto
 export const createParto = async (req, res) => {
   try {
+    const { granja_id } = req.user;
     const {
-      reproduccion_id,
-      pig_id,
+      servicio_id,              // reproduccion_id
       fecha_parto,
       lechones_nacidos_vivos,
       lechones_nacidos_muertos,
       lechones_momificados,
-      peso_promedio_lechon,
-      observaciones
+      peso_camada_kg,           // frontend usa este nombre
+      observaciones,
     } = req.body;
 
-    // 1. Validar proceso reproductivo previo
-    if (reproduccion_id) {
-      const reproCheck = await pool.query("SELECT estado FROM reproduccion WHERE id = $1", [reproduccion_id]);
+    // Validar servicio
+    const servCheck = await pool.query(
+      "SELECT id, pig_id, estado FROM reproduccion WHERE id = $1 AND granja_id = $2",
+      [servicio_id, granja_id]
+    );
+    if (servCheck.rows.length === 0)
+      return res.status(404).json({ error: "El servicio especificado no existe." });
 
-      if (reproCheck.rows.length === 0) {
-        return res.status(404).json({ error: "El servicio de reproducción especificado no existe." });
-      }
+    const { estado, pig_id } = servCheck.rows[0];
+    if (estado !== "GESTANTE" && estado !== "CONFIRMADA")
+      return res.status(400).json({
+        error: `No se puede registrar parto para un servicio en estado '${estado}'. Debe estar GESTANTE o CONFIRMADA.`
+      });
 
-      const estadoActual = reproCheck.rows[0].estado;
-      if (estadoActual !== 'GESTANTE' && estadoActual !== 'CONFIRMADA') {
-        return res.status(400).json({
-          error: `No se puede registrar parto para un servicio en estado '${estadoActual}'. Debe estar GESTANTE o CONFIRMADA.`
-        });
-      }
-    } else {
-      // Opcional: Impedir partos "huérfanos" (sin servicio asociado) si la regla de negocio lo exige estricto.
-      // Por ahora permitimos partos históricos manuales, pero con advertencia si fuera frontend.
-      // Si la regla dice "NO partos sin servicio":
-      // return res.status(400).json({ error: "Debe asociar un servicio de reproducción (monta/inseminación) válido." });
-    }
+    // Insertar parto
+    const { rows } = await pool.query(`
+      INSERT INTO partos
+        (reproduccion_id, pig_id, fecha_parto, lechones_nacidos_vivos,
+         lechones_nacidos_muertos, lechones_momificados, peso_promedio_lechon, observaciones)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [servicio_id, pig_id, fecha_parto,
+        lechones_nacidos_vivos || 0,
+        lechones_nacidos_muertos || 0,
+        lechones_momificados || 0,
+        peso_camada_kg || null,
+        observaciones || null]);
 
-    const { rows } = await pool.query(
-      `INSERT INTO partos 
-       (reproduccion_id, pig_id, fecha_parto, lechones_nacidos_vivos, lechones_nacidos_muertos,
-        lechones_momificados, peso_promedio_lechon, observaciones)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [reproduccion_id, pig_id, fecha_parto, lechones_nacidos_vivos, lechones_nacidos_muertos,
-        lechones_momificados, peso_promedio_lechon, observaciones]
+    // Actualizar estado del servicio
+    await pool.query(
+      "UPDATE reproduccion SET estado = 'PARTO_REGISTRADO' WHERE id = $1",
+      [servicio_id]
     );
 
-    // Actualizar estado de reproducción a PARTO_REALIZADO
-    if (reproduccion_id) {
-      await pool.query(
-        "UPDATE reproduccion SET estado = 'PARTO_REALIZADO' WHERE id = $1",
-        [reproduccion_id]
-      );
-    }
-
-    // Opcional: Actualizar etapa del cerdo a 'LACTANCIA' automáticamente
+    // Actualizar etapa de la cerda a LACTANCIA
     if (pig_id) {
       await pool.query("UPDATE pigs SET etapa = 'LACTANCIA' WHERE id = $1", [pig_id]);
     }
@@ -217,60 +312,52 @@ export const createParto = async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (error) {
     console.error("Error en createParto:", error);
-    res.status(500).json({ ok: false, error: "Error interno del servidor", detail: error.message });
+    res.status(500).json({ error: error.message });
   }
 };
 
-// Actualizar parto
 export const updateParto = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      reproduccion_id,
-      pig_id,
-      fecha_parto,
-      lechones_nacidos_vivos,
-      lechones_nacidos_muertos,
-      lechones_momificados,
-      peso_promedio_lechon,
-      observaciones
+      fecha_parto, lechones_nacidos_vivos, lechones_nacidos_muertos,
+      lechones_momificados, peso_camada_kg, observaciones,
     } = req.body;
 
-    const { rows } = await pool.query(
-      `UPDATE partos 
-       SET reproduccion_id = $1, pig_id = $2, fecha_parto = $3, 
-           lechones_nacidos_vivos = $4, lechones_nacidos_muertos = $5,
-           lechones_momificados = $6, peso_promedio_lechon = $7, observaciones = $8
-       WHERE id = $9
-       RETURNING *`,
-      [reproduccion_id, pig_id, fecha_parto, lechones_nacidos_vivos, lechones_nacidos_muertos,
-        lechones_momificados, peso_promedio_lechon, observaciones, id]
-    );
+    const { rows } = await pool.query(`
+      UPDATE partos SET
+        fecha_parto = $1, lechones_nacidos_vivos = $2,
+        lechones_nacidos_muertos = $3, lechones_momificados = $4,
+        peso_promedio_lechon = $5, observaciones = $6
+      WHERE id = $7
+      RETURNING *
+    `, [fecha_parto, lechones_nacidos_vivos || 0, lechones_nacidos_muertos || 0,
+        lechones_momificados || 0, peso_camada_kg || null, observaciones || null, id]);
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Registro no encontrado" });
-    }
-
+    if (rows.length === 0) return res.status(404).json({ error: "Parto no encontrado" });
     res.json(rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 };
 
-// Eliminar parto
 export const deleteParto = async (req, res) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(
-      "DELETE FROM partos WHERE id = $1 RETURNING *",
-      [id]
+      "DELETE FROM partos WHERE id = $1 RETURNING *", [id]
     );
+    if (rows.length === 0) return res.status(404).json({ error: "Parto no encontrado" });
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Registro no encontrado" });
+    // Revertir estado del servicio a GESTANTE
+    if (rows[0].reproduccion_id) {
+      await pool.query(
+        "UPDATE reproduccion SET estado = 'GESTANTE' WHERE id = $1",
+        [rows[0].reproduccion_id]
+      );
     }
 
-    res.json({ message: "Registro eliminado exitosamente" });
+    res.json({ message: "Parto eliminado exitosamente" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
