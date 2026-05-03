@@ -4,7 +4,7 @@
  * (Con traductor de base de datos integrado para granja_id y Carga)
  */
 
-const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || "https://api-agrofarm.onrender.com/api";
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || "https://prueba-mfws.onrender.com/api";
 
 // ── Helpers de Token ──────────────────────────────────────────────
 

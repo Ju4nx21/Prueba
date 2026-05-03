@@ -1,12 +1,12 @@
 // src/pages/Nutricion.jsx
 /**
  * AGROFARM - Nutricion.jsx
- * Versión: 14.5.0 - Formulario Inteligente para Consumos agregado
+ * Versión: 14.6.0 - Edición, Eliminación y Observaciones en Consumos agregados
  * Autor: Kevin (adaptado y mejorado)
  *
  * Cambios:
- * - Se agregó la lógica y el formulario para registrar Consumos de Alimento.
- * - El botón superior ahora es contextual (cambia según la pestaña activa).
+ * - Se agregó la lógica para Editar y Eliminar Consumos de Alimento.
+ * - Se agregó la columna "Observaciones" y "Acciones" en la tabla de Historial.
  * - Código anterior INTACTO (0 líneas eliminadas).
  */
 
@@ -142,6 +142,7 @@ export default function Nutricion({ mode = "A" }) {
   };
   const [consumoForm, setConsumoForm] = useState(initialConsumoForm);
   const [isSubmittingConsumo, setIsSubmittingConsumo] = useState(false);
+  const [editingConsumoId, setEditingConsumoId] = useState(null); // <-- AÑADIDO PARA EDITAR CONSUMOS
 
   // Pagination & sorting
   const [page, setPage]         = useState(1);
@@ -275,7 +276,7 @@ export default function Nutricion({ mode = "A" }) {
     setForm(initialForm);
   };
 
-  // ── NUEVA FUNCIÓN: GUARDAR CONSUMO ──
+  // ── NUEVA FUNCIÓN: GUARDAR / EDITAR CONSUMO ──
   const handleConsumoSubmit = async (e) => {
     e && e.preventDefault && e.preventDefault();
     if (!consumoForm.pigs_id || !consumoForm.alimentacion_id || !consumoForm.cantidad_kg) {
@@ -296,16 +297,37 @@ export default function Nutricion({ mode = "A" }) {
         granjas_id: user?.granjas_id ? parseInt(user.granjas_id, 10) : null
       };
 
-      await apiPost("/nutricion/consumos", payload);
-      toast.success("¡Consumo registrado exitosamente!");
+      // <-- LÓGICA AÑADIDA PARA EDITAR SI HAY UN ID -->
+      if (editingConsumoId) {
+        await apiPut(`/nutricion/consumos/${editingConsumoId}`, payload);
+        toast.success("¡Consumo actualizado exitosamente!");
+      } else {
+        await apiPost("/nutricion/consumos", payload);
+        toast.success("¡Consumo registrado exitosamente!");
+      }
+
       setConsumoForm(initialConsumoForm);
+      setEditingConsumoId(null); // Reset
       setShowForm(false);
       load(); // Recargamos para que aparezca en el historial y se actualice el stock
     } catch (err) {
       console.error("Error al registrar consumo:", err);
-      toast.error("No se pudo registrar el consumo");
+      toast.error("No se pudo registrar/actualizar el consumo");
     } finally {
       setIsSubmittingConsumo(false);
+    }
+  };
+
+  // ── NUEVA FUNCIÓN: ELIMINAR CONSUMO ──
+  const handleDeleteConsumo = async (id) => {
+    if (!window.confirm("¿Eliminar este registro de consumo permanentemente?")) return;
+    try {
+      await apiDelete(`/nutricion/consumos/${id}`);
+      toast.success("Consumo eliminado correctamente");
+      load();
+    } catch (err) {
+      console.error("Delete error:", err);
+      toast.error("No se pudo eliminar el consumo");
     }
   };
 
@@ -426,7 +448,13 @@ export default function Nutricion({ mode = "A" }) {
             
             {/* BOTÓN INTELIGENTE: Cambia de color y texto según la pestaña */}
             <button 
-              onClick={() => setShowForm((s) => !s)} 
+              onClick={() => {
+                if (tab === "consumos" && !showForm) {
+                  setConsumoForm(initialConsumoForm); // Resetear si abrimos nuevo
+                  setEditingConsumoId(null);
+                }
+                setShowForm((s) => !s);
+              }} 
               className={`px-4 py-2 text-white font-black rounded-xl shadow-md transition-all text-xs uppercase tracking-widest ${tab === "consumos" ? "bg-purple-600 hover:bg-purple-700" : "bg-orange-500 hover:bg-orange-600"}`}
               aria-pressed={showForm}
             >
@@ -535,7 +563,7 @@ export default function Nutricion({ mode = "A" }) {
             </form>
           )}
 
-          {/* FORMULARIO 2: REGISTRAR CONSUMO (Se muestra solo en la pestaña Historial) */}
+          {/* FORMULARIO 2: REGISTRAR / EDITAR CONSUMO (Se muestra solo en la pestaña Historial) */}
           {tab === "consumos" && (
             <form onSubmit={handleConsumoSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="space-y-1">
@@ -574,9 +602,14 @@ export default function Nutricion({ mode = "A" }) {
                 <input type="text" placeholder="Alguna nota..." value={consumoForm.observaciones} onChange={(e) => setConsumoForm({...consumoForm, observaciones: e.target.value})} className={inputClass} />
               </div>
 
-              <div className="md:col-span-3 flex justify-end">
+              <div className="md:col-span-3 flex gap-3 justify-end">
+                {editingConsumoId && (
+                  <button type="button" onClick={() => { setConsumoForm(initialConsumoForm); setEditingConsumoId(null); }} className="px-4 py-2 border rounded-md">
+                    Cancelar
+                  </button>
+                )}
                 <button type="submit" disabled={isSubmittingConsumo} className="px-6 py-2 bg-purple-600 text-white font-black rounded-xl text-xs uppercase tracking-widest hover:bg-purple-700 transition-all disabled:opacity-50">
-                  {isSubmittingConsumo ? "Guardando..." : "Guardar Registro de Consumo"}
+                  {isSubmittingConsumo ? "Guardando..." : (editingConsumoId ? "Actualizar Registro" : "Guardar Registro de Consumo")}
                 </button>
               </div>
             </form>
@@ -673,16 +706,19 @@ export default function Nutricion({ mode = "A" }) {
             <table className="w-full text-left">
               <thead>
                 <tr className="bg-gray-50/50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                  <th className="px-8 py-6">Cerdo (pigs_id)</th>
-                  <th className="px-8 py-6">Alimento (alimentacion_id)</th>
+                  <th className="px-8 py-6">Cerdo</th>
+                  <th className="px-8 py-6">Alimento</th>
                   <th className="px-8 py-6">Cantidad (kg)</th>
                   <th className="px-8 py-6">Lote</th>
                   <th className="px-8 py-6">Fecha</th>
+                  {/* COLUMNA NUEVA AÑADIDA */}
+                  <th className="px-8 py-6">Observaciones</th>
+                  {/* COLUMNA NUEVA AÑADIDA */}
+                  <th className="px-8 py-6 text-center">Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {consumos.map((c) => {
-                  // Pequeño extra visual: Buscamos los nombres para que no se vean solo los números aburridos
                   const cerdo = pigs.find(p => p.id === c.pigs_id);
                   const alimento = alimentos.find(a => a.id === c.alimentacion_id);
                   
@@ -703,12 +739,41 @@ export default function Nutricion({ mode = "A" }) {
                       <td className="px-8 py-4 text-[10px] font-bold text-slate-300 uppercase">
                         {c.fecha ? new Date(c.fecha).toLocaleDateString() : "—"}
                       </td>
+                      {/* CELDA NUEVA AÑADIDA: OBSERVACIONES */}
+                      <td className="px-8 py-4 text-xs text-slate-400">
+                        {c.observaciones ?? <span className="text-slate-200 italic">—</span>}
+                      </td>
+                      {/* CELDA NUEVA AÑADIDA: ACCIONES (EDITAR / ELIMINAR) */}
+                      <td className="px-8 py-4 text-center">
+                        <button
+                          onClick={() => {
+                            setConsumoForm({
+                              pigs_id: c.pigs_id || "",
+                              alimentacion_id: c.alimentacion_id || "",
+                              cantidad_kg: c.cantidad_kg || "",
+                              fecha: c.fecha ? c.fecha.split('T')[0] : "",
+                              lote: c.lote || "",
+                              observaciones: c.observaciones || ""
+                            });
+                            setEditingConsumoId(c.id);
+                            setShowForm(true);
+                            window.scrollTo({ top: 0, behavior: "smooth" });
+                          }}
+                          className="p-2 text-blue-400 hover:text-blue-600"
+                          aria-label={`Editar consumo`}
+                        >
+                          <i className="fas fa-edit"></i>
+                        </button>
+                        <button onClick={() => handleDeleteConsumo(c.id)} className="p-2 text-red-400 hover:text-red-600" aria-label={`Eliminar consumo`}>
+                          <i className="fas fa-trash"></i>
+                        </button>
+                      </td>
                     </tr>
                   )
                 })}
                 {consumos.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-8 py-12 text-center text-slate-400">No hay registros de consumo. Presione "Registrar Consumo" arriba para comenzar.</td>
+                    <td colSpan={7} className="px-8 py-12 text-center text-slate-400">No hay registros de consumo. Presione "Registrar Consumo" arriba para comenzar.</td>
                   </tr>
                 )}
               </tbody>
