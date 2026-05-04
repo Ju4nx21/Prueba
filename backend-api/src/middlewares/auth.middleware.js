@@ -18,10 +18,12 @@ export const validateAuth = (req, res, next) => {
     const decoded = verifyToken(token);
 
     // Adjuntar datos del usuario al request para uso en controllers
+    // ¡AQUÍ ESTÁ LA CORRECCIÓN CLAVE PARA EL granja_id!
     req.user = {
-      userId: decoded.userId,
+      userId: decoded.id || decoded.userId,
       username: decoded.username,
-      role: decoded.role
+      role: decoded.role,
+      granja_id: decoded.granja_id 
     };
 
     next();
